@@ -17,6 +17,15 @@ async function hashFile(file: File): Promise<string> {
 }
 
 type Step = 'idle' | 'hashing' | 'ready' | 'submitting' | 'done' | 'error';
+type SubmitPaperMethod = {
+  accounts(accounts: {
+    paper: PublicKey;
+    owner: PublicKey;
+    systemProgram: PublicKey;
+  }): {
+    rpc(): Promise<string>;
+  };
+};
 
 const PAPER_ACCOUNT_SPACE = 1100;
 const TRANSACTION_FEE_BUFFER_LAMPORTS = 10_000;
@@ -111,6 +120,11 @@ export default function SubmitPage() {
       const wallet = { publicKey, signAllTransactions, signTransaction };
       const provider = new AnchorProvider(connection, wallet as never, { commitment: 'confirmed' });
       const program = getProgram(provider);
+      const submitPaper = program.methods.submitPaper as unknown as (
+        hash: string,
+        title: string,
+        authors: string[]
+      ) => SubmitPaperMethod;
 
       const [paperPDA] = PublicKey.findProgramAddressSync([Buffer.from(hash.substring(0, 32))], PROGRAM_ID);
       
@@ -120,8 +134,7 @@ export default function SubmitPage() {
         throw new Error('This exact document has already been recorded on the blockchain!');
       }
 
-      const tx = await program.methods
-        .submitPaper(hash, title.trim(), authorList)
+      const tx = await submitPaper(hash, title.trim(), authorList)
         .accounts({ paper: paperPDA, owner: publicKey, systemProgram: SystemProgram.programId })
         .rpc();
 
