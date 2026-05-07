@@ -4,7 +4,7 @@ import { useState, useRef, DragEvent, ChangeEvent } from 'react';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import { AnchorProvider } from '@coral-xyz/anchor';
-import { PublicKey, SystemProgram } from '@solana/web3.js';
+import { LAMPORTS_PER_SOL, PublicKey, SendTransactionError, SystemProgram } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import Link from 'next/link';
 import { getProgram, PROGRAM_ID } from '@/lib/provenanceChainProgram';
@@ -17,6 +17,43 @@ async function hashFile(file: File): Promise<string> {
 }
 
 type Step = 'idle' | 'hashing' | 'ready' | 'submitting' | 'done' | 'error';
+
+const PAPER_ACCOUNT_SPACE = 1100;
+const TRANSACTION_FEE_BUFFER_LAMPORTS = 10_000;
+
+function formatSol(lamports: number): string {
+  return `${(lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`;
+}
+
+async function getSubmitErrorMessage(
+  error: unknown,
+  connection: ReturnType<typeof useConnection>['connection'],
+  minimumLamports: number
+): Promise<string> {
+  const fallback = error instanceof Error ? error.message : 'Transaction failed.';
+  const message = fallback.toLowerCase();
+
+  if (message.includes('attempt to debit an account but found no record of a prior credit')) {
+    return `This wallet does not have enough devnet SOL to create the on-chain paper record. Fund the same Phantom wallet with at least ${formatSol(minimumLamports)} on Solana Devnet and try again.`;
+  }
+
+  if (message.includes('user rejected')) {
+    return 'Transaction approval was cancelled in your wallet.';
+  }
+
+  if (!(error instanceof SendTransactionError)) {
+    return fallback;
+  }
+
+  const logs = await error.getLogs(connection);
+  const logSummary = logs?.slice(-3).join(' | ');
+
+  if (logSummary?.toLowerCase().includes('attempt to debit an account but found no record of a prior credit')) {
+    return `This wallet does not have enough devnet SOL to create the on-chain paper record. Fund the same Phantom wallet with at least ${formatSol(minimumLamports)} on Solana Devnet and try again.`;
+  }
+
+  return logSummary ? `${fallback} Logs: ${logSummary}` : fallback;
+}
 
 export default function SubmitPage() {
   const { connection } = useConnection();
@@ -59,6 +96,17 @@ export default function SubmitPage() {
       if (title.trim().length > 200) throw new Error('Title must be 200 characters or fewer.');
       if (authorList.length > 10) throw new Error('Maximum 10 authors allowed.');
       if (authorList.some(a => a.length > 64)) throw new Error('Author names must be 64 characters or fewer.');
+      if (!signTransaction) throw new Error('Use a Solana wallet that can sign transactions, such as Phantom on Devnet.');
+
+      const minimumLamports = await connection.getMinimumBalanceForRentExemption(PAPER_ACCOUNT_SPACE)
+        + TRANSACTION_FEE_BUFFER_LAMPORTS;
+      const walletBalance = await connection.getBalance(publicKey);
+
+      if (walletBalance < minimumLamports) {
+        throw new Error(
+          `This wallet needs at least ${formatSol(minimumLamports)} on Solana Devnet to record a paper. Fund the same Phantom wallet and try again.`
+        );
+      }
 
       const wallet = { publicKey, signAllTransactions, signTransaction };
       const provider = new AnchorProvider(connection, wallet as never, { commitment: 'confirmed' });
@@ -72,15 +120,17 @@ export default function SubmitPage() {
         throw new Error('This exact document has already been recorded on the blockchain!');
       }
 
-      const tx = await (program.methods as any)
-  .submitPaper(hash, title.trim(), authorList)
-  .accounts({ paper: paperPDA, owner: publicKey, systemProgram: SystemProgram.programId })
-  .rpc();
+      const tx = await program.methods
+        .submitPaper(hash, title.trim(), authorList)
+        .accounts({ paper: paperPDA, owner: publicKey, systemProgram: SystemProgram.programId })
+        .rpc();
 
       setTxSig(tx);
       setStep('done');
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Transaction failed.';
+      const minimumLamports = await connection.getMinimumBalanceForRentExemption(PAPER_ACCOUNT_SPACE)
+        + TRANSACTION_FEE_BUFFER_LAMPORTS;
+      const msg = await getSubmitErrorMessage(e, connection, minimumLamports);
       setError(msg);
       setStep('error');
     }
@@ -299,6 +349,7 @@ export default function SubmitPage() {
                     disabled={step === 'submitting'}
                   />
                   <p className="hint">Separate multiple authors with commas</p>
+                  <p className="hint">Use Phantom on Solana Devnet and keep a little devnet SOL in the same wallet for rent and fees.</p>
 
                   {step === 'error' && <div className="error-box">{error}</div>}
 
@@ -315,7 +366,7 @@ export default function SubmitPage() {
                     </button>
                   ) : (
                     <div className="connect-prompt">
-                      Connect your wallet to submit
+                      Connect a Solana wallet such as Phantom to submit on Devnet
                       <div style={{ marginTop: '0.75rem' }}><WalletMultiButton /></div>
                     </div>
                   )}
